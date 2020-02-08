@@ -1,3 +1,4 @@
+import numpy as np
 import pygame as pg
 
 try:
@@ -47,7 +48,7 @@ class Game:
         self.game_screen_rect = self.game_screen.get_rect()
         self.background = pg.Surface(self.game_screen.get_size())
         self.background.fill(pg.Color('skyblue'))
-        self.fps = 30
+        self.fps = 120
         self.all_sprites = pg.sprite.Group()
         self.running = True
 
@@ -117,8 +118,8 @@ class Game:
 # =============================================================================
 
         transformed_screen = pg.transform.scale(self.game_screen,
-                                                self.display_rect.size)
-        self.display_screen.blit(transformed_screen, (0, 0))
+                                                self.display_rect.size, self.display_screen)
+        #self.display_screen.blit(transformed_screen, (0, 0))
         pg.display.update()
 
 
@@ -160,16 +161,15 @@ class Mode7:
         self.far = 0.01215
         # field of view
         self.fov_half = pi / 4
+        self.draw = self._draw
+
+    def set_np_drawing(self, enabled=True):
+        self.draw = self._np_draw if enabled else self._draw
         
     
     def update(self, dt):
         # references to the "fake" screen (the one that gets rendered onto the screen)
-        screen = self.game.game_screen
-        screen_rect = self.game.game_screen_rect
-        
         player = self.game.player
-        
-        horizon = 0.2
         
         # create the frustum corner points
         self.far_x1 = player.pos.x + cos(player.angle - self.fov_half) * self.far
@@ -186,7 +186,7 @@ class Mode7:
 
         near_rect = (self.near_x1, self.near_y1, self.near_x2, self.near_y2)
         far_rect = (self.far_x1, self.far_y1, self.far_x2, self.far_y2)
-        self._draw(self.image, self.game.game_screen, near_rect, far_rect)
+        self.draw(self.image, self.game.game_screen, near_rect, far_rect)
 
         keys = pg.key.get_pressed()
         # control the rendering parameters
@@ -219,6 +219,9 @@ class Mode7:
         get_ = source.get_at
         set_ = screen.set_at
         for y in range(screen_height):
+            _y = int(y + screen_height*HORIZON)
+            if _y >= screen_height:
+                break
             # take a sample point for depth linearly related to rows on the screen
             sample_depth = y/screen_height + 0.0000001  # this prevents div by 0 errors
             # not sure how this is handled in the c++ code
@@ -229,12 +232,13 @@ class Mode7:
             start_y = (far_y1 - near_y1)/sample_depth + near_y1
             end_x = (far_x2 - near_x2)/sample_depth + near_x2
             end_y = (far_y2 - near_y2)/sample_depth + near_y2
+            fx = (end_x - start_x)/screen_width
+            fy = (end_y - start_y)/screen_width
 
             # Linearly interpolate lines across the screen
             for x in range(screen_width):
-                sample_width = x/screen_width
-                sample_x = (end_x - start_x)*sample_width + start_x
-                sample_y = (end_y - start_y)*sample_width + start_y
+                sample_x = x*fx + start_x
+                sample_y = x*fy + start_y
 
                 # Wrap sample coordinates to give "infinite" periodicity on maps
                 sample_x = sample_x%1
@@ -246,7 +250,41 @@ class Mode7:
                             int(sample_y*height)))
                 # set the pixel values of the fake screen image
                 # get_at and set_at are super slow, gonna try pixel arrays instead
-                set_((x, int(y + screen_height*HORIZON)), col)
+                set_((x, _y), col)
+
+    @staticmethod
+    def _np_draw(source, screen, near_rect, far_rect):
+        HORIZON = 0.2
+        width, height = source.get_rect().size
+        screen_width, screen_height = screen.get_rect().size
+        near_x1, near_y1, near_x2, near_y2 = near_rect
+        far_x1, far_y1, far_x2, far_y2 = far_rect
+
+        np_source = pg.surfarray.pixels3d(source)
+        np_screen = pg.surfarray.pixels3d(screen)
+        for y in range(screen_height):
+            _y = int(y + screen_height*HORIZON)
+            if _y >= screen_height:
+                break
+            # take a sample point for depth linearly related to rows on the screen
+            sample_depth = y/screen_height + 0.0000001  # this prevents div by 0 errors
+            # not sure how this is handled in the c++ code
+
+            # Use sample point in non-linear (1/x) way to enable perspective
+            # and grab start and end points for lines across the screen
+            start_x = (far_x1 - near_x1)/sample_depth + near_x1
+            start_y = (far_y1 - near_y1)/sample_depth + near_y1
+            end_x = (far_x2 - near_x2)/sample_depth + near_x2
+            end_y = (far_y2 - near_y2)/sample_depth + near_y2
+            fx = (end_x - start_x)/screen_width
+            fy = (end_y - start_y)/screen_width
+
+            xs = np.arange(screen_width)
+            sample_x = (xs*fx + start_x)%1
+            sample_x = (sample_x*width).astype(int)
+            sample_y = (xs*fy + start_y)%1
+            sample_y = (sample_y*width).astype(int)
+            np_screen[xs, _y] = np_source[sample_x, sample_y]
 
 
 # ENUMS correspond to kart image index
@@ -463,6 +501,7 @@ class Bush(pg.sprite.Sprite):
 if __name__ == '__main__':
     try:
         g = Game()
+        g.map.set_np_drawing()
         g.run()
     except Exception:
         traceback.print_exc()
